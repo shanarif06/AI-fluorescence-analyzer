@@ -11,7 +11,6 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "GEMINI_API_KEY is missing" });
     }
 
-    // --- Build Gemini request ---
     const body = {
       contents: [
         {
@@ -29,7 +28,7 @@ export default async function handler(req, res) {
             {
               text:
                 prompt ||
-                "Analyze fluorescence intensity and describe the RGB characteristics of this image.",
+                "Analyze fluorescence intensity and describe RGB color features.",
             },
           ],
         },
@@ -46,15 +45,14 @@ export default async function handler(req, res) {
     );
 
     const data = await response.json();
-    console.log("Gemini API Response:", data);
+    console.log("🧠 Gemini Raw Response:", JSON.stringify(data, null, 2));
 
-    // --- Extract text safely ---
     const text =
       data?.candidates?.[0]?.content?.parts?.[0]?.text ||
       data?.error?.message ||
       "No response from Gemini.";
 
-    res.status(200).json({ text });
+    res.status(200).json({ text, raw: data });
   } catch (error) {
     console.error("Gemini API Error:", error);
     res.status(500).json({ error: "Error connecting to Gemini API." });
