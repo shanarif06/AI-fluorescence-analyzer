@@ -17,13 +17,29 @@ export default async function handler(req, res) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
+          contents: [
+            {
+              parts: [
+                {
+                  text: prompt || "Analyze the uploaded image and summarize RGB intensity."
+                },
+              ],
+            },
+          ],
         }),
       }
     );
 
     const data = await response.json();
-    res.status(200).json(data);
+
+    // Debugging log (optional)
+    console.log("Gemini response:", data);
+
+    if (!data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+      return res.status(200).json({ text: "No response from Gemini." });
+    }
+
+    res.status(200).json({ text: data.candidates[0].content.parts[0].text });
   } catch (error) {
     console.error("Gemini API Error:", error);
     res.status(500).json({ error: "Error connecting to Gemini API." });
