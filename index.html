@@ -1,775 +1,546 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { Camera, Zap, FileText, Upload, ShieldCheck, Loader, XCircle, MousePointer2, ListChecks, Database, Save, Trash2, Clock } from 'lucide-react';
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Smartphone Sensing Analyzer — Single File</title>
 
-// --- Firebase Imports (for Persistent Data Logging) ---
-import { initializeApp, getApps } from 'firebase/app'; 
-import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, collection, query, onSnapshot, addDoc, deleteDoc, doc, setLogLevel } from 'firebase/firestore';
+  <!-- Tailwind CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
 
-/**
- * Fluorescence Sensing Analyzer (Modeling 2.0 Style)
- * This application analyzes an uploaded image to extract RGB values (client-side) 
- * and uses the Gemini API's multimodal capabilities to estimate fluorescence intensity (AI-side).
- */
-const App = () => {
-  const [file, setFile] = useState(null);
-  const [previewUrl, setPreviewUrl] = useState('');
-  const [base64Image, setBase64Image] = useState('');
-  const [rgb, setRgb] = useState({ r: 0, g: 0, b: 0 });
-  const [aiResult, setAiResult] = useState(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState(null);
-  const [protocol, setProtocol] = useState('');
-  const [isProtocolLoading, setIsProtocolLoading] = useState(false);
-  const [savedResults, setSavedResults] = useState([]);
-  const [isAuthReady, setIsAuthReady] = useState(false);
+  <!-- Lucide icons CDN -->
+  <script src="https://unpkg.com/lucide@0.286.0/dist/lucide.min.js"></script>
 
-  // Firestore state
-  const [db, setDb] = useState(null);
-  const [auth, setAuth] = useState(null);
-  const [userId, setUserId] = useState(null);
-
-  // ROI state: 5 (small) to 40 (large) in the 100x100 canvas context
-  const [roiSize, setRoiSize] = useState(15); 
-  
-  // Stores the normalized position (0-100%) of the user's selected sample point
-  const [samplePos, setSamplePos] = useState({ x: 50, y: 50 }); 
-
-  const canvasRef = useRef(null);
-
-  // --- API Key Setup (Reads from process.env for external deployment, uses blank for Canvas) ---
-  // The Canvas runtime provides the key automatically when 'apiKey' is blank.
-  const apiKey = typeof process !== 'undefined' && process.env.REACT_APP_GEMINI_API_KEY ? process.env.REACT_APP_GEMINI_API_KEY : "";
-  const geminiApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
-
-
-  // --- REAL Firebase Config Placeholder (*** STEP 1: PASTE YOUR CONFIG HERE ***) ---
-  // You MUST replace the values below with the configuration object from your own Firebase project
-  // when deploying externally (e.g., Vercel).
-  const USER_FIREBASE_CONFIG = {
-    apiKey: "YOUR_API_KEY_GOES_HERE",
-    authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
-    projectId: "YOUR_PROJECT_ID",
-    storageBucket: "YOUR_PROJECT_ID.appspot.com",
-    messagingSenderId: "...",
-    appId: "...",
-    measurementId: "...",
-  };
-
-  // --- Environment Setup (Crucial for Canvas compatibility) ---
-  const inCanvas = typeof __firebase_config !== 'undefined';
-  const appId = inCanvas ? (typeof __app_id !== 'undefined' ? __app_id : 'default-canvas-app-id') : "external-sensing-app"; 
-  
-  // Use Canvas globals if available, otherwise use the external placeholder config
-  const selectedFirebaseConfig = inCanvas ? JSON.parse(__firebase_config) : USER_FIREBASE_CONFIG;
-  const initialAuthToken = inCanvas ? (typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null) : null;
-
-
-  // --- Firebase Initialization and Authentication ---
-  useEffect(() => {
-    
-    // Safety check for unconfigured external deployment
-    const isPlaceholderConfig = selectedFirebaseConfig.apiKey === "YOUR_API_KEY_GOES_HERE";
-    if (!inCanvas && isPlaceholderConfig) {
-        console.error("Firebase config not set. Please fill in USER_FIREBASE_CONFIG for external deployment.");
-        setError("Firebase configuration missing. Cannot authenticate.");
-        setIsAuthReady(true);
-        setUserId(crypto.randomUUID()); 
-        return;
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+    body { font-family: 'Inter', sans-serif; }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      background: #4f46e5;
+      cursor: pointer;
+      box-shadow: 0 0 5px rgba(0,0,0,0.3);
+      margin-top: -8px;
     }
+  </style>
+</head>
+<body class="bg-gray-100 min-h-screen p-6">
 
-    setLogLevel('Debug');
-    
-    // Check if Firebase app is already initialized to prevent the duplicate-app error
-    const existingApp = getApps().find(app => app.name === '[DEFAULT]');
-    let firebaseApp;
-    if (existingApp) {
-        firebaseApp = existingApp;
-    } else {
-        // Initialize if not already initialized
-        firebaseApp = initializeApp(selectedFirebaseConfig);
-    }
-    
-    const newAuth = getAuth(firebaseApp);
-    const newDb = getFirestore(firebaseApp);
-
-    setAuth(newAuth);
-    setDb(newDb);
-
-    // Function to handle custom token (Canvas) or anonymous (Fallback) sign-in
-    const authenticate = async () => {
-        try {
-            if (initialAuthToken) {
-                // Priority 1: Use provided custom token (Canvas environment)
-                await signInWithCustomToken(newAuth, initialAuthToken);
-            } else {
-                // Priority 2: Sign in anonymously (external or fallback)
-                await signInAnonymously(newAuth);
-            }
-        } catch (e) {
-            // This is the error handler for invalid keys/tokens
-            console.error("Authentication failed during initialization (using fallback ID):", e);
-            // Fallback to anonymous ID and mark as ready to ensure app functionality
-            setUserId(crypto.randomUUID()); 
-            setIsAuthReady(true);
-        }
-    };
-    
-    // Listen for auth state changes
-    const unsubscribe = onAuthStateChanged(newAuth, (user) => {
-      if (user) {
-        setUserId(user.uid);
-        setIsAuthReady(true);
-      } else { 
-        // If user is null (initial load or signed out), attempt sign in to get a user object
-        authenticate();
-      }
-    });
-
-    // Clean up the listener
-    return () => unsubscribe();
-  }, [inCanvas, initialAuthToken]); // userId removed from dependencies to prevent infinite loop
-
-
-  // --- Firestore Listener for Results History ---
-  useEffect(() => {
-    if (db && userId) {
-      const resultsCollectionRef = collection(db, 'artifacts', appId, 'users', userId, 'sensing_results');
-      const resultsQuery = query(resultsCollectionRef);
-
-      const unsubscribe = onSnapshot(resultsQuery, (snapshot) => {
-        const results = [];
-        snapshot.forEach((doc) => {
-          const data = doc.data();
-          results.push({
-            id: doc.id,
-            ...data,
-            // Handle Firestore Timestamp objects or plain strings
-            timestamp: data.timestamp?.toDate ? data.timestamp.toDate() : new Date(data.timestamp),
-          });
-        });
-        // Sort newest first
-        results.sort((a, b) => b.timestamp - a.timestamp); 
-        setSavedResults(results);
-      }, (error) => {
-        console.error("Firestore Error: ", error);
-        setError("Could not load saved results. Check console for details.");
-      });
-
-      return () => unsubscribe();
-    }
-  }, [db, userId, appId]);
-
-  // --- Helper for API calls with backoff ---
-  const fetchWithRetry = useCallback(async (url, options, retries = 3) => {
-    for (let i = 0; i < retries; i++) {
-      try {
-        const response = await fetch(url, options);
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
-        }
-        return response;
-      } catch (e) {
-        if (i < retries - 1) {
-          const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
-          await new Promise(resolve => setTimeout(resolve, delay));
-        } else {
-          throw e;
-        }
-      }
-    }
-  }, []);
-
-  // --- Client-Side RGB Extraction ---
-  const extractRGB = (image, pos, size) => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const ctx = canvas.getContext('2d');
-    const width = 100; // Fixed size for canvas context
-    const height = 100;
-    canvas.width = width;
-    canvas.height = height;
-
-    // Draw the image to the canvas, fitting it to the 100x100 area
-    ctx.drawImage(image, 0, 0, width, height);
-
-    const sampleSize = size; 
-    
-    // Calculate top-left corner of the sample block, centered on the requested (pos.x, pos.y)
-    let startX = Math.round((pos.x / 100) * width) - Math.floor(sampleSize / 2);
-    let startY = Math.round((pos.y / 100) * height) - Math.floor(sampleSize / 2);
-
-    // Clamp values to ensure the sample block stays within the 100x100 canvas
-    startX = Math.max(0, Math.min(width - sampleSize, startX));
-    startY = Math.max(0, Math.min(height - sampleSize, startY));
-
-    // Get image data for the central block
-    const imageData = ctx.getImageData(startX, startY, sampleSize, sampleSize);
-    const data = imageData.data;
-    
-    let totalR = 0, totalG = 0, totalB = 0;
-    const pixelCount = data.length / 4;
-
-    // Sum the RGB values
-    for (let i = 0; i < data.length; i += 4) {
-      totalR += data[i];
-      totalG += data[i + 1];
-      totalB += data[i + 2];
-    }
-
-    // Calculate the average
-    setRgb({
-      r: Math.round(totalR / pixelCount),
-      g: Math.round(totalG / pixelCount),
-      b: Math.round(totalB / pixelCount),
-    });
-  };
-
-  // --- File Handling and Conversion ---
-  const handleFileChange = (event) => {
-    const selectedFile = event.target.files[0];
-    if (!selectedFile) return;
-
-    // Reset state
-    setFile(selectedFile);
-    setAiResult(null);
-    setError(null);
-    setProtocol('');
-    setSamplePos({ x: 50, y: 50 }); // Reset sample position to center
-
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      const base64 = reader.result.split(',')[1];
-      setBase64Image(base64);
-      setPreviewUrl(reader.result);
-
-      // Load image into memory to get dimensions and extract RGB from the default center (50, 50)
-      const img = new Image();
-      img.onload = () => extractRGB(img, { x: 50, y: 50 }, roiSize);
-      img.src = reader.result;
-    };
-    reader.onerror = () => setError("Failed to read file.");
-    reader.readAsDataURL(selectedFile);
-  };
-
-  // --- Image Click Handler ---
-  const handleImageClick = (e) => {
-    if (!previewUrl || isLoading) return;
-
-    const rect = e.currentTarget.getBoundingClientRect();
-    const x = e.clientX - rect.left; // x position within the element.
-    const y = e.clientY - rect.top;  // y position within the element.
-
-    // Normalize coordinates to 0-100%
-    const normalizedX = (x / rect.width) * 100;
-    const normalizedY = (y / rect.height) * 100;
-
-    // Update state and re-extract RGB
-    const newPos = { x: normalizedX, y: normalizedY };
-    setSamplePos(newPos);
-
-    const img = new Image();
-    img.onload = () => extractRGB(img, newPos, roiSize);
-    img.src = previewUrl;
-    
-    // Clear previous prediction and protocol as data changed
-    setAiResult(null); 
-    setProtocol('');
-  };
-
-  // --- ROI Size Handler ---
-  const handleRoiChange = (e) => {
-    const newSize = parseInt(e.target.value, 10);
-    setRoiSize(newSize);
-    setAiResult(null);
-    setProtocol('');
-    if (previewUrl) {
-      const img = new Image();
-      img.onload = () => extractRGB(img, samplePos, newSize);
-      img.src = previewUrl;
-    }
-  };
-
-  // --- AI Prediction (Gemini API Call) ---
-  const getAiPrediction = async () => {
-    if (!base64Image) {
-      setError('Please upload an image first.');
-      return;
-    }
-
-    setIsLoading(true);
-    setAiResult(null);
-    setError(null);
-    setProtocol('');
-
-    // Updated Prompt: More specific and quantitative
-    const prompt = `You are a highly sensitive and quantitative Spectrophotometric Analysis Engine specializing in image-based chemical sensing. Your task is to estimate the **Relative Fluorescence Intensity (RFI)** of the chemical sample shown in the image, providing a high-confidence score between 0 and 100.
-
-**INPUT DATA:**
-1.  **Image:** The raw visual evidence of fluorescence emission.
-2.  **Sample Point (Normalized):** (${samplePos.x.toFixed(1)}%, ${samplePos.y.toFixed(1)}%)
-3.  **ROI Size (Pixels):** ${roiSize}x${roiSize}
-4.  **Measured Average RGB (0-255 scale):** Red: ${rgb.r}, Green: ${rgb.g}, Blue: ${rgb.b}
-
-**ANALYSIS CRITERIA:**
-1.  **Quantitative Focus:** Use the magnitude of the RGB values (especially the dominant color channel) as the primary quantitative input for the RFI score.
-2.  **Visual Context:** Assess the overall brightness, contrast against the background, and clarity of the signal to validate the quantitative data.
-3.  **Color Analysis:** Determine the dominant emission color from the image for the description.
-
-Provide a brief technical analysis that synthesizes the visual evidence with the quantitative RGB data. Your final output MUST strictly adhere to the provided JSON schema.`;
-
-    // Define the structured JSON output schema
-    const systemPrompt = "You are a specialized materials sensing analysis engine. Your only output must be a single JSON object that contains the fluorescence intensity and a brief analysis. Do not include any text outside of the JSON block.";
-
-    const payload = {
-      contents: [
-        {
-          role: "user",
-          parts: [
-            { text: prompt },
-            {
-              inlineData: {
-                mimeType: file.type, // e.g., image/jpeg or image/png
-                data: base64Image
-              }
-            }
-          ]
-        }
-      ],
-      systemInstruction: {
-          parts: [{ text: systemPrompt }]
-      },
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: "OBJECT",
-          properties: {
-            "intensity_score": {
-              "type": "INTEGER",
-              "description": "The estimated fluorescence intensity on a scale from 0 (dark/no fluorescence) to 100 (maximum brightness)."
-            },
-            "color_description": {
-              "type": "STRING", 
-              "description": "A brief, professional description of the dominant fluorescence color observed."
-            },
-            "analysis_notes": {
-              "type": "STRING",
-              "description": "A short, two-sentence analysis relating the observed color and RGB values to the estimated intensity."
-            }
-          },
-          "required": ["intensity_score", "color_description", "analysis_notes"]
-        }
-      }
-    };
-
-    try {
-      const response = await fetchWithRetry(geminiApiUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      
-      const result = await response.json();
-      const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
-
-      if (jsonText) {
-        const parsedJson = JSON.parse(jsonText);
-        setAiResult(parsedJson);
-      } else {
-        throw new Error("AI model returned an unexpected or empty response.");
-      }
-    } catch (e) {
-      console.error("AI Prediction Error:", e);
-      setError(`Failed to get AI prediction: ${e.message}. Ensure your image is clearly visible.`);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  // --- AI Protocol Generation (Gemini API with Search Grounding) ---
-  const generateStandardProtocol = async () => {
-    if (!aiResult) {
-        setError("Please run an AI prediction first.");
-        return;
-    }
-
-    setIsProtocolLoading(true);
-    setProtocol('');
-    
-    // Prompt informed by the AI result
-    const protocolPrompt = `Generate a very brief, three-step standard operating procedure (SOP) for preparing a basic stock solution or calibration standards for a fluorescence sensing experiment involving a material that fluoresces the color: ${aiResult.color_description}. The material shows ${aiResult.intensity_score}/100 intensity. Focus on common lab materials and glassware.`;
-    
-    // Using search grounding for real-world relevance
-    const protocolPayload = {
-      contents: [{ parts: [{ text: protocolPrompt }] }],
-      tools: [{ "google_search": {} }],
-      systemInstruction: {
-          parts: [{ text: "You are a laboratory automation assistant. Provide the SOP as a concise, numbered list of steps, without any introduction or conclusion." }]
-      },
-    };
-
-    try {
-      const response = await fetchWithRetry(geminiApiUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(protocolPayload)
-      });
-      
-      const result = await response.json();
-      const protocolText = result.candidates?.[0]?.content?.parts?.[0]?.text;
-
-      if (protocolText) {
-        setProtocol(protocolText);
-      } else {
-        setProtocol('Could not generate a relevant standard protocol. Please try again.');
-      }
-    } catch (e) {
-      console.error("Protocol Generation Error:", e);
-      setProtocol('An error occurred during protocol generation.');
-    } finally {
-      setIsProtocolLoading(false);
-    }
-  };
-
-  // --- Save Result to Firestore ---
-  const saveCurrentResult = async () => {
-    if (!db || !userId) {
-      setError("Database is not ready. Please wait for authentication.");
-      return;
-    }
-    if (!aiResult || !previewUrl) {
-      setError("Please run an AI prediction and ensure an image is uploaded before saving.");
-      return;
-    }
-
-    const resultData = {
-      timestamp: new Date().toISOString(),
-      roiSize: roiSize,
-      samplePos: samplePos,
-      rgb: rgb,
-      intensity: aiResult.intensity_score,
-      color: aiResult.color_description,
-      notes: aiResult.analysis_notes,
-      previewUrl: previewUrl.substring(0, 200) + "...", 
-      protocol: protocol.substring(0, 500) 
-    };
-
-    try {
-      const resultsCollectionRef = collection(db, 'artifacts', appId, 'users', userId, 'sensing_results');
-      await addDoc(resultsCollectionRef, resultData);
-      setError("Result successfully saved to history!");
-    } catch (e) {
-      console.error("Error saving document: ", e);
-      setError("Failed to save result. Please try again.");
-    }
-  };
-
-  // --- Delete Result from Firestore ---
-  const deleteResult = async (id) => {
-    if (!db || !userId) return;
-    try {
-      const docRef = doc(db, 'artifacts', appId, 'users', userId, 'sensing_results', id);
-      await deleteDoc(docRef);
-      setError("Result deleted.");
-    } catch (e) {
-      console.error("Error deleting document: ", e);
-      setError("Failed to delete result.");
-    }
-  };
-
-  // --- Component Renders ---
-  const RgbChip = ({ color, value }) => (
-    <div className="flex flex-col items-center p-3 rounded-lg shadow-md bg-white border border-gray-200">
-      <div 
-        className="w-10 h-10 rounded-full mb-1 border-2 border-gray-300" 
-        style={{ backgroundColor: `rgb(${color === 'R' ? value : 0}, ${color === 'G' ? value : 0}, ${color === 'B' ? value : 0})` }}
-      ></div>
-      <span className={`font-bold text-xl ${color === 'R' ? 'text-red-600' : color === 'G' ? 'text-green-600' : 'text-blue-600'}`}>{color}</span>
-      <span className="text-sm text-gray-700">{value}</span>
-    </div>
-  );
-
-  const ResultHistoryItem = ({ result, onDelete }) => (
-    <div className="p-4 mb-3 bg-white rounded-xl shadow-sm border border-gray-100 flex items-center justify-between transition-all duration-200 hover:shadow-md">
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center space-x-2 text-sm font-semibold text-gray-800">
-          <Clock className="w-4 h-4 text-indigo-500" />
-          <span>{result.timestamp.toLocaleTimeString()} - {result.timestamp.toLocaleDateString()}</span>
-        </div>
-        <div className="mt-1 text-xs text-gray-600 truncate">
-          Intensity: <span className="font-bold text-lg text-teal-600">{result.intensity}</span> | Color: {result.color} | ROI: {result.roiSize}x{result.roiSize}
-        </div>
+  <div class="max-w-4xl mx-auto bg-white p-6 rounded-2xl shadow-2xl">
+    <header class="text-center mb-6">
+      <div class="flex items-center justify-center space-x-3">
+        <svg id="camera-icon" class="w-7 h-7 text-red-500"></svg>
+        <h1 class="text-2xl sm:text-3xl font-extrabold text-indigo-700">Smartphone Sensing Analyzer</h1>
       </div>
-      <button 
-        onClick={() => onDelete(result.id)}
-        className="ml-4 p-2 text-red-500 hover:text-red-700 rounded-full hover:bg-red-50 transition duration-150"
-        title="Delete result"
-      >
-        <Trash2 className="w-5 h-5" />
-      </button>
+      <p class="mt-2 text-gray-500">Extract RGB, analyze with AI (optional), and track experiments.</p>
+    </header>
+
+    <!-- Status / Errors -->
+    <div id="status" class="mb-4"></div>
+
+    <!-- Upload -->
+    <div class="mb-6 p-4 bg-indigo-50 rounded-xl border border-indigo-200">
+      <label for="file-upload" class="cursor-pointer flex flex-col items-center p-6 border-4 border-dashed border-indigo-400 rounded-xl hover:border-indigo-600">
+        <svg id="upload-icon" class="w-8 h-8 text-indigo-500"></svg>
+        <span id="file-label" class="mt-2 text-lg font-semibold text-indigo-700">Click to Upload Fluorescence Image</span>
+        <span class="text-sm text-gray-500">PNG or JPEG (max ~5MB recommended)</span>
+        <input id="file-upload" type="file" accept="image/*" class="hidden" />
+      </label>
     </div>
-  );
 
-  return (
-    <div className="min-h-screen bg-gray-100 flex flex-col items-center p-4 sm:p-8 font-sans">
-      <script src="https://cdn.tailwindcss.com"></script>
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
-        body { font-family: 'Inter', sans-serif; }
-        input[type=range]::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            appearance: none;
-            width: 20px;
-            height: 20px;
-            border-radius: 50%; 
-            background: #4f46e5;
-            cursor: pointer;
-            box-shadow: 0 0 5px rgba(0,0,0,0.3);
-            margin-top: -8px; 
-        }
-      `}</style>
-
-      <div className="w-full max-w-4xl bg-white shadow-2xl rounded-2xl p-6 sm:p-10 transition-all duration-300">
-        
-        {/* Header */}
-        <header className="text-center mb-8">
-          <h1 className="text-3xl sm:text-4xl font-extrabold text-indigo-700 flex items-center justify-center space-x-3">
-            <Camera className="h-7 w-7 sm:h-8 sm:w-8 text-red-500" />
-            <span>Smartphone Sensing Analyzer</span>
-          </h1>
-          <p className="mt-2 text-md sm:text-lg text-gray-500">
-            Extract RGB, analyze with AI, and track your experiments.
-          </p>
-        </header>
-
-        {/* Auth Status/Error */}
-        {!isAuthReady && (
-             <div className="flex items-center p-4 mb-6 bg-yellow-100 border border-yellow-400 text-yellow-700 rounded-lg">
-                <Loader className="w-5 h-5 mr-3 animate-spin" />
-                <p className="font-medium">Initializing database and user session...</p>
-            </div>
-        )}
-        {error && (
-            <div className="flex items-center p-4 mb-6 bg-red-100 border border-red-400 text-red-700 rounded-lg">
-                <XCircle className="w-5 h-5 mr-3" />
-                <p className="font-medium">Analysis Error: {error}</p>
-            </div>
-        )}
-
-        {/* File Upload Section */}
-        <div className="mb-8 p-6 bg-indigo-50 rounded-xl border border-indigo-200 shadow-inner">
-          <label htmlFor="file-upload" className="flex flex-col items-center justify-center cursor-pointer p-6 border-4 border-dashed border-indigo-400 rounded-xl hover:border-indigo-600 transition duration-150">
-            <Upload className="w-8 h-8 text-indigo-500" />
-            <span className="mt-2 text-lg font-semibold text-indigo-700">
-              {file ? file.name : 'Click to Upload Fluorescence Image'}
-            </span>
-            <span className="text-sm text-gray-500">
-              PNG or JPEG (max 5MB recommended)
-            </span>
-            <input 
-              id="file-upload" 
-              type="file" 
-              accept="image/*" 
-              onChange={handleFileChange} 
-              className="hidden"
-              disabled={isLoading || isProtocolLoading}
-            />
-          </label>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+      <!-- Left: Image preview + RGB -->
+      <div>
+        <div class="mb-4">
+          <label class="block text-sm font-medium text-gray-700 mb-2">Region of Interest (ROI) Size: <span id="roi-value">15</span> px</label>
+          <input id="roi-range" type="range" min="5" max="40" step="1" value="15" class="w-full" />
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-          
-          {/* Column 1: Image Preview & RGB */}
-          <div className="flex flex-col space-y-4">
-            <h2 className="text-2xl font-bold text-gray-800 flex items-center">
-              <Camera className="w-5 h-5 mr-2 text-indigo-500" /> Image and Measured Data
-            </h2>
-            
-            {/* ROI Slider */}
-            <div className="p-4 bg-white rounded-lg shadow-md border border-gray-200">
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Region of Interest (ROI) Size: {roiSize}x{roiSize} pixels
-                </label>
-                <input 
-                    type="range"
-                    min="5" 
-                    max="40" 
-                    step="5" 
-                    value={roiSize} 
-                    onChange={handleRoiChange}
-                    className="w-full h-2 bg-indigo-100 rounded-lg appearance-none cursor-pointer range-lg"
-                    disabled={isLoading || isProtocolLoading}
-                />
-            </div>
-
-
-            {previewUrl ? (
-              <>
-                <div 
-                  className="relative w-full aspect-[4/3] rounded-xl overflow-hidden shadow-lg border-4 border-gray-300 cursor-pointer"
-                  onClick={handleImageClick}
-                >
-                  <img 
-                    src={previewUrl} 
-                    alt="Uploaded Fluorescence Sample" 
-                    className="w-full h-full object-cover pointer-events-none" // prevents image dragging issues
-                  />
-                  {/* Sample Point Indicator (Moved to clicked position) */}
-                  <div 
-                    className="absolute border-4 border-white rounded-full bg-transparent shadow-[0_0_0_2px_rgba(0,0,0,0.5)] flex items-center justify-center text-xs text-white font-bold backdrop-blur-sm transition-all duration-200"
-                    style={{ 
-                      left: `${samplePos.x}%`, 
-                      top: `${samplePos.y}%`, 
-                      transform: 'translate(-50%, -50%)',
-                      width: `${roiSize * 0.4}%`, // Scale indicator size visually
-                      height: `${roiSize * 0.4}%`,
-                      pointerEvents: 'none' 
-                    }}
-                    title={`Sampling at (${samplePos.x.toFixed(1)}%, ${samplePos.y.toFixed(1)}%) with ${roiSize}x${roiSize} ROI`}
-                  >
-                    <MousePointer2 className="w-4 h-4" />
-                  </div>
-                  <p className="absolute bottom-2 left-1/2 transform -translate-x-1/2 text-xs font-medium text-white bg-black bg-opacity-50 px-2 py-1 rounded-full shadow-lg">
-                    Click image to set sample point
-                  </p>
-                </div>
-
-                {/* Hidden canvas for client-side processing */}
-                <canvas ref={canvasRef} style={{ display: 'none' }}></canvas>
-
-                <div className="flex justify-around p-4 bg-gray-50 rounded-xl shadow-md border">
-                  <RgbChip color="R" value={rgb.r} />
-                  <RgbChip color="G" value={rgb.g} />
-                  <RgbChip color="B" value={rgb.b} />
-                </div>
-              </>
-            ) : (
-              <div className="w-full aspect-[4/3] bg-gray-200 rounded-xl flex items-center justify-center text-gray-500 italic border-4 border-dashed border-gray-400">
-                Image Preview
-              </div>
-            )}
-          </div>
-
-          {/* Column 2: AI Prediction & Protocol */}
-          <div className="flex flex-col space-y-6">
-            <h2 className="text-2xl font-bold text-gray-800 flex items-center">
-              <Zap className="w-5 h-5 mr-2 text-red-500" /> AI-Enhanced Prediction
-            </h2>
-
-            <button
-              onClick={getAiPrediction}
-              disabled={isLoading || isProtocolLoading || !file}
-              className={`w-full flex justify-center items-center py-3 px-6 text-lg font-semibold rounded-xl shadow-lg transition duration-300 transform 
-                ${isLoading 
-                  ? 'bg-gray-400 text-gray-200 cursor-not-allowed' 
-                  : !file 
-                    ? 'bg-indigo-300 text-white cursor-not-allowed'
-                    : 'bg-indigo-600 hover:bg-indigo-700 text-white hover:scale-[1.01] active:scale-[0.99] focus:outline-none focus:ring-4 focus:ring-indigo-300'
-                }`}
-            >
-              {isLoading ? (
-                <><Loader className="w-5 h-5 mr-2 animate-spin" /> Analyzing...</>
-              ) : (
-                <><ShieldCheck className="w-5 h-5 mr-2" /> Estimate Intensity</>
-              )}
-            </button>
-
-            {/* Prediction Summary */}
-            <div className="p-5 bg-white rounded-xl shadow-xl border border-gray-200 min-h-[170px] flex flex-col justify-center">
-              <h3 className="text-xl font-semibold mb-4 text-gray-700 flex items-center">
-                <FileText className="w-5 h-5 mr-2 text-teal-500" /> Prediction Summary
-              </h3>
-
-              {aiResult ? (
-                <div className="space-y-3">
-                  <div className="p-3 bg-teal-50 rounded-lg border-l-4 border-teal-500">
-                    <p className="text-lg font-bold text-teal-700">
-                      Intensity Score: <span className="text-3xl ml-1">{aiResult.intensity_score} / 100</span>
-                    </p>
-                    <p className="text-sm text-gray-600 mt-1">Color: {aiResult.color_description}</p>
-                  </div>
-                  <p className="text-gray-700">
-                    <span className="font-semibold block mt-2">Analysis:</span> 
-                    {aiResult.analysis_notes}
-                  </p>
-                </div>
-              ) : (
-                <p className="text-gray-400 italic text-center">
-                  Upload an image and click "Estimate Intensity" to see the AI analysis here.
-                </p>
-              )}
-            </div>
-            
-            {/* Save Button */}
-            {aiResult && isAuthReady && (
-                <button
-                    onClick={saveCurrentResult}
-                    disabled={!isAuthReady || isLoading || isProtocolLoading}
-                    className="w-full flex justify-center items-center py-2 px-4 text-md font-semibold rounded-lg text-white bg-green-500 hover:bg-green-600 transition duration-300 shadow-md"
-                >
-                    <Save className="w-4 h-4 mr-2" /> Save Result to History
-                </button>
-            )}
-
-            {/* Protocol Generator */}
-            {aiResult && (
-                <div className="p-5 bg-yellow-50 rounded-xl shadow-xl border border-yellow-200">
-                    <h3 className="text-xl font-semibold mb-3 text-gray-700 flex items-center">
-                        <ListChecks className="w-5 h-5 mr-2 text-yellow-600" /> Standard Protocol Guidance ✨
-                    </h3>
-                    <button
-                        onClick={generateStandardProtocol}
-                        disabled={isProtocolLoading}
-                        className={`w-full flex justify-center items-center py-2 px-4 text-sm font-semibold rounded-lg transition duration-300 
-                            ${isProtocolLoading 
-                                ? 'bg-yellow-400 text-gray-700 cursor-not-allowed' 
-                                : 'bg-yellow-500 hover:bg-yellow-600 text-white shadow-md'
-                            }`}
-                    >
-                        {isProtocolLoading ? (
-                            <><Loader className="w-4 h-4 mr-2 animate-spin" /> Generating SOP...</>
-                        ) : (
-                            <>Generate Calibration Protocol</>
-                        )}
-                    </button>
-                    {protocol && (
-                        <div className="mt-4 p-3 bg-white border border-gray-200 rounded-lg text-sm text-gray-700 whitespace-pre-wrap max-h-40 overflow-y-auto">
-                            {protocol}
-                        </div>
-                    )}
-                </div>
-            )}
+        <div id="preview-container" class="w-full aspect-[4/3] rounded-xl overflow-hidden shadow-lg border border-gray-300 bg-gray-200 flex items-center justify-center">
+          <p id="preview-placeholder" class="text-gray-500 italic">Image Preview</p>
+          <div id="image-wrapper" class="relative w-full h-full hidden cursor-pointer">
+            <img id="preview-img" src="" alt="preview" class="w-full h-full object-cover pointer-events-none" />
+            <div id="sample-indicator" class="absolute rounded-full border-4 border-white shadow-[0_0_0_2px_rgba(0,0,0,0.5)] pointer-events-none" title="Sample point"></div>
+            <p class="absolute bottom-2 left-1/2 -translate-x-1/2 text-xs font-medium text-white bg-black bg-opacity-50 px-2 py-1 rounded-full">Click image to set sample point</p>
           </div>
         </div>
 
-        {/* Results History Section */}
-        <hr className="my-10 border-gray-300" />
-        <div className="w-full">
-            <h2 className="text-2xl font-bold text-gray-800 flex items-center mb-6">
-                <Database className="w-6 h-6 mr-3 text-indigo-500" /> Experimental History ({savedResults.length})
-            </h2>
-            <div className="bg-gray-100 p-4 rounded-xl shadow-inner max-h-96 overflow-y-auto">
-                {savedResults.length > 0 ? (
-                    savedResults.map((result) => (
-                        <ResultHistoryItem key={result.id} result={result} onDelete={deleteResult} />
-                    ))
-                ) : (
-                    <p className="text-gray-500 italic text-center py-8">
-                        No results saved yet. Analyze an image and click "Save Result to History."
-                        {userId && <span className="block mt-2 text-xs">User ID: {userId}</span>}
-                    </p>
-                )}
-            </div>
+        <canvas id="hidden-canvas" width="100" height="100" style="display:none;"></canvas>
+
+        <div class="flex justify-around mt-4">
+          <div class="flex flex-col items-center p-3 rounded-lg bg-white border border-gray-200">
+            <div id="r-chip" class="w-10 h-10 rounded-full mb-1 border-2 border-gray-300"></div>
+            <span class="font-bold text-xl text-red-600">R</span>
+            <span id="r-val" class="text-sm text-gray-700">0</span>
+          </div>
+          <div class="flex flex-col items-center p-3 rounded-lg bg-white border border-gray-200">
+            <div id="g-chip" class="w-10 h-10 rounded-full mb-1 border-2 border-gray-300"></div>
+            <span class="font-bold text-xl text-green-600">G</span>
+            <span id="g-val" class="text-sm text-gray-700">0</span>
+          </div>
+          <div class="flex flex-col items-center p-3 rounded-lg bg-white border border-gray-200">
+            <div id="b-chip" class="w-10 h-10 rounded-full mb-1 border-2 border-gray-300"></div>
+            <span class="font-bold text-xl text-blue-600">B</span>
+            <span id="b-val" class="text-sm text-gray-700">0</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right: AI Prediction + Buttons -->
+      <div>
+        <button id="analyze-btn" class="w-full py-3 rounded-xl bg-indigo-600 text-white font-semibold mb-4 disabled:opacity-60" disabled>
+          Estimate Intensity
+        </button>
+
+        <div class="p-4 bg-white rounded-xl border border-gray-200 min-h-[170px]">
+          <h3 class="text-xl font-semibold text-gray-700 mb-3">Prediction Summary</h3>
+          <div id="prediction-area" class="text-gray-600 italic">Upload an image and click "Estimate Intensity".</div>
         </div>
 
+        <div id="protocol-block" class="mt-4 p-4 bg-yellow-50 rounded-xl border border-yellow-200 hidden">
+          <h3 class="font-semibold mb-2">Standard Protocol Guidance</h3>
+          <button id="gen-protocol-btn" class="w-full py-2 rounded-lg bg-yellow-500 text-white font-semibold mb-3">Generate Calibration Protocol</button>
+          <pre id="protocol-text" class="text-sm bg-white p-3 rounded border border-gray-200 max-h-40 overflow-y-auto"></pre>
+        </div>
+
+        <div id="save-block" class="mt-4 hidden">
+          <button id="save-btn" class="w-full py-2 rounded-lg bg-green-500 text-white font-semibold mb-2">Save Result to History</button>
+        </div>
       </div>
-      <footer className="mt-8 text-center text-gray-400 text-sm">
-        <p>Application ID: {appId}</p>
-        <p>This is a demonstration of AI-enhanced Materials Modeling 2.0 using the Gemini API.</p>
-      </footer>
     </div>
-  );
+
+    <hr class="my-8" />
+
+    <section>
+      <h2 class="text-xl font-bold mb-4">Experimental History</h2>
+      <div id="history" class="bg-gray-100 p-4 rounded-xl max-h-64 overflow-y-auto">
+        <p class="text-gray-500 italic">No results saved yet.</p>
+      </div>
+    </section>
+
+    <footer class="mt-6 text-sm text-gray-400 text-center">
+      Application ID: external-sensing-app — Demo conversion by assistant
+    </footer>
+  </div>
+
+<script>
+/* ------------- CONFIG: Set your keys/config here ------------- */
+
+/* Gemini API key (optional). If empty, AI calls will be disabled.
+   Note: calling Google Generative Language API from a browser may cause CORS issues.
+   Recommended: call from a server-side proxy or add proper CORS allow rules on the server.
+*/
+const GEMINI_API_KEY = ""; // set your API key here
+
+/* Firebase optional config. If you want Firestore persistence, paste your config here.
+   Example:
+const FIREBASE_CONFIG = {
+  apiKey: "...",
+  authDomain: "...",
+  projectId: "...",
+  storageBucket: "...",
+  messagingSenderId: "...",
+  appId: "..."
 };
+*/
+const FIREBASE_CONFIG = null; // set to an object to enable Firestore integration
 
-export default App;
+/* ------------- End config ------------- */
+
+/* Simple utility for status messages */
+const statusEl = document.getElementById('status');
+function setStatus(msg, type = 'info') {
+  if (!msg) { statusEl.innerHTML = ''; return; }
+  const color = (type==='error') ? 'red' : (type==='success') ? 'green' : 'yellow';
+  statusEl.innerHTML = '<div class="p-3 rounded-lg text-sm ' +
+    (type==='error' ? 'bg-red-100 border border-red-400 text-red-700' : (type==='success' ? 'bg-green-100 border border-green-400 text-green-700' : 'bg-yellow-100 border border-yellow-400 text-yellow-700')) +
+    '">' + msg + '</div>';
+}
+
+/* DOM refs */
+const fileInput = document.getElementById('file-upload');
+const fileLabel = document.getElementById('file-label');
+const previewPlaceholder = document.getElementById('preview-placeholder');
+const imageWrapper = document.getElementById('image-wrapper');
+const previewImg = document.getElementById('preview-img');
+const sampleIndicator = document.getElementById('sample-indicator');
+const previewContainer = document.getElementById('preview-container');
+const roiRange = document.getElementById('roi-range');
+const roiValue = document.getElementById('roi-value');
+const rVal = document.getElementById('r-val');
+const gVal = document.getElementById('g-val');
+const bVal = document.getElementById('b-val');
+const rChip = document.getElementById('r-chip');
+const gChip = document.getElementById('g-chip');
+const bChip = document.getElementById('b-chip');
+const analyzeBtn = document.getElementById('analyze-btn');
+const predictionArea = document.getElementById('prediction-area');
+const protocolBlock = document.getElementById('protocol-block');
+const genProtocolBtn = document.getElementById('gen-protocol-btn');
+const protocolText = document.getElementById('protocol-text');
+const saveBlock = document.getElementById('save-block');
+const saveBtn = document.getElementById('save-btn');
+const historyEl = document.getElementById('history');
+const hiddenCanvas = document.getElementById('hidden-canvas');
+
+let currentFile = null;
+let previewUrl = '';
+let base64Image = '';
+let rgb = { r:0, g:0, b:0 };
+let samplePos = { x: 50, y: 50 }; // percent
+let roiSize = parseInt(roiRange.value, 10) || 15;
+let aiResult = null;
+
+/* Helper: file -> base64 */
+function fileToDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+/* Extract average RGB from a region on a 100x100 canvas */
+function extractRGBFromImage(img, pos, size) {
+  const canvas = hiddenCanvas;
+  const ctx = canvas.getContext('2d');
+  const width = 100, height = 100;
+  canvas.width = width;
+  canvas.height = height;
+  // draw image to fit 100x100
+  ctx.clearRect(0,0,width,height);
+  ctx.drawImage(img, 0, 0, width, height);
+
+  const sampleSize = size;
+  let startX = Math.round((pos.x / 100) * width) - Math.floor(sampleSize / 2);
+  let startY = Math.round((pos.y / 100) * height) - Math.floor(sampleSize / 2);
+  startX = Math.max(0, Math.min(width - sampleSize, startX));
+  startY = Math.max(0, Math.min(height - sampleSize, startY));
+
+  const imageData = ctx.getImageData(startX, startY, sampleSize, sampleSize);
+  const data = imageData.data;
+  let totalR = 0, totalG = 0, totalB = 0;
+  const pixelCount = data.length / 4;
+  for (let i=0;i<data.length;i+=4){
+    totalR += data[i];
+    totalG += data[i+1];
+    totalB += data[i+2];
+  }
+  rgb.r = Math.round(totalR / pixelCount);
+  rgb.g = Math.round(totalG / pixelCount);
+  rgb.b = Math.round(totalB / pixelCount);
+  updateRGBUI();
+}
+
+/* Update the small RGB chips */
+function updateRGBUI(){
+  rVal.textContent = rgb.r;
+  gVal.textContent = rgb.g;
+  bVal.textContent = rgb.b;
+  rChip.style.backgroundColor = `rgb(${rgb.r},0,0)`;
+  gChip.style.backgroundColor = `rgb(0,${rgb.g},0)`;
+  bChip.style.backgroundColor = `rgb(0,0,${rgb.b})`;
+}
+
+/* Handle file chosen */
+fileInput.addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  if (!f.type.startsWith('image/')) {
+    setStatus('Please choose an image file.', 'error');
+    return;
+  }
+  setStatus('', null);
+  currentFile = f;
+  fileLabel.textContent = f.name;
+  const dataUrl = await fileToDataURL(f);
+  previewUrl = dataUrl;
+  base64Image = dataUrl.split(',')[1];
+  previewImg.src = dataUrl;
+  previewPlaceholder.style.display = 'none';
+  imageWrapper.classList.remove('hidden');
+  previewImg.onload = () => {
+    // default center
+    samplePos = { x:50, y:50 };
+    updateSampleIndicator();
+    extractRGBFromImage(previewImg, samplePos, roiSize);
+    analyzeBtn.disabled = false;
+    predictionArea.innerHTML = '<p class="text-center text-gray-400 italic">Ready — click "Estimate Intensity".</p>';
+  };
+});
+
+/* Click to set sample point */
+document.getElementById('image-wrapper').addEventListener('click', (e) => {
+  const rect = e.currentTarget.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+  const normalizedX = (x / rect.width) * 100;
+  const normalizedY = (y / rect.height) * 100;
+  samplePos = { x: normalizedX, y: normalizedY };
+  updateSampleIndicator();
+  if (previewImg.src) {
+    extractRGBFromImage(previewImg, samplePos, roiSize);
+    aiResult = null;
+    predictionArea.innerHTML = '<p class="text-gray-400 italic text-center">Point changed — click "Estimate Intensity".</p>';
+  }
+});
+
+/* Update visual sample indicator */
+function updateSampleIndicator(){
+  const el = sampleIndicator;
+  const sizePercent = Math.max(3, (roiSize * 0.4)); // visual scaling
+  el.style.left = samplePos.x + '%';
+  el.style.top = samplePos.y + '%';
+  el.style.transform = 'translate(-50%, -50%)';
+  el.style.width = sizePercent + '%';
+  el.style.height = sizePercent + '%';
+}
+
+/* ROI range */
+roiRange.addEventListener('input', (e) => {
+  roiSize = parseInt(e.target.value,10);
+  roiValue.textContent = roiSize;
+  if (previewImg.src) extractRGBFromImage(previewImg, samplePos, roiSize);
+});
+
+/* Retry-enabled fetch */
+async function fetchWithRetry(url, options={}, retries=3){
+  for (let i=0;i<retries;i++){
+    try {
+      const res = await fetch(url, options);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return res;
+    } catch (err) {
+      if (i === retries-1) throw err;
+      await new Promise(r => setTimeout(r, Math.pow(2,i)*500 + Math.random()*300));
+    }
+  }
+}
+
+/* Build Gemini payload (mirrors original) */
+function buildGeminiPayload() {
+  const prompt = `You are a highly sensitive and quantitative Spectrophotometric Analysis Engine specializing in image-based chemical sensing. Your task is to estimate the Relative Fluorescence Intensity (RFI) of the chemical sample shown in the image, providing a high-confidence score between 0 and 100.
+
+INPUT DATA:
+1. Image (provided separately)
+2. Sample Point (Normalized): (${samplePos.x.toFixed(1)}%, ${samplePos.y.toFixed(1)}%)
+3. ROI Size (Pixels): ${roiSize}x${roiSize}
+4. Measured Average RGB (0-255): Red: ${rgb.r}, Green: ${rgb.g}, Blue: ${rgb.b}
+
+ANALYSIS CRITERIA:
+Use the magnitude of the RGB values and brightness as primary inputs. Provide a JSON object with keys intensity_score (0-100), color_description, analysis_notes.`;
+
+  const systemPrompt = "Output a single JSON object only.";
+
+  const payload = {
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { text: prompt },
+          {
+            inlineData: {
+              mimeType: "image/jpeg",
+              data: base64Image
+            }
+          }
+        ]
+      }
+    ],
+    systemInstruction: {
+      parts: [{ text: systemPrompt }]
+    },
+    generationConfig: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: "OBJECT",
+        properties: {
+          intensity_score: { type: "INTEGER" },
+          color_description: { type: "STRING" },
+          analysis_notes: { type: "STRING" }
+        },
+        required: ["intensity_score", "color_description", "analysis_notes"]
+      }
+    }
+  };
+  return payload;
+}
+
+/* Call Gemini API — may require server-side proxy due to CORS */
+analyzeBtn.addEventListener('click', async () => {
+  if (!base64Image) { setStatus('Upload an image first.', 'error'); return; }
+  if (!GEMINI_API_KEY) {
+    setStatus('GEMINI_API_KEY is empty — AI calls disabled. Client-side RGB still works.', 'info');
+    // We can optionally produce a naive local estimation using brightness
+    const brightness = (rgb.r + rgb.g + rgb.b) / 3;
+    const estimated = Math.round((brightness/255) * 100);
+    aiResult = {
+      intensity_score: estimated,
+      color_description: (rgb.g > rgb.r && rgb.g > rgb.b) ? 'greenish' : (rgb.r > rgb.g && rgb.r > rgb.b) ? 'reddish' : (rgb.b > rgb.r && rgb.b > rgb.g) ? 'blueish' : 'neutral',
+      analysis_notes: `Local estimate: brightness=${Math.round(brightness)} mapped to intensity ${estimated}/100.`
+    };
+    displayAiResult();
+    return;
+  }
+
+  setStatus('Analyzing with Gemini...', 'info');
+  analyzeBtn.disabled = true;
+  predictionArea.innerHTML = '<p class="text-gray-500 italic">Contacting AI model — this may take a few seconds.</p>';
+
+  try {
+    const payload = buildGeminiPayload();
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${GEMINI_API_KEY}`;
+    const res = await fetchWithRetry(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }, 3);
+
+    const result = await res.json();
+    const jsonText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!jsonText) throw new Error('No JSON text in model response');
+    const parsed = JSON.parse(jsonText);
+    aiResult = parsed;
+    displayAiResult();
+    setStatus('AI analysis complete.', 'success');
+  } catch (err) {
+    console.error('AI error', err);
+    setStatus('AI call failed. See console. You may need a server proxy or valid API key.', 'error');
+    // fallback local estimate
+    const brightness = (rgb.r + rgb.g + rgb.b) / 3;
+    const estimated = Math.round((brightness/255) * 100);
+    aiResult = {
+      intensity_score: estimated,
+      color_description: (rgb.g > rgb.r && rgb.g > rgb.b) ? 'greenish' : (rgb.r > rgb.g && rgb.r > rgb.b) ? 'reddish' : (rgb.b > rgb.r && rgb.b > rgb.g) ? 'blueish' : 'neutral',
+      analysis_notes: `Fallback local estimate: brightness=${Math.round(brightness)} -> intensity ${estimated}/100.`
+    };
+    displayAiResult();
+  } finally {
+    analyzeBtn.disabled = false;
+  }
+});
+
+function displayAiResult(){
+  if (!aiResult) return;
+  predictionArea.innerHTML = `
+    <div class="p-3 bg-teal-50 rounded-lg border-l-4 border-teal-500">
+      <p class="text-lg font-bold text-teal-700">Intensity Score: <span class="text-3xl">${aiResult.intensity_score} / 100</span></p>
+      <p class="text-sm text-gray-600 mt-1">Color: ${aiResult.color_description}</p>
+    </div>
+    <p class="mt-3 text-gray-700"><strong>Analysis:</strong> ${aiResult.analysis_notes}</p>
+  `;
+  protocolBlock.classList.remove('hidden');
+  saveBlock.classList.remove('hidden');
+}
+
+/* Protocol generation (uses Gemini similarly) */
+genProtocolBtn.addEventListener('click', async () => {
+  if (!aiResult) { setStatus('Run AI prediction first.', 'error'); return; }
+  protocolText.textContent = 'Generating...';
+  genProtocolBtn.disabled = true;
+  try {
+    if (!GEMINI_API_KEY) {
+      protocolText.textContent = `1. Prepare simple calibration standard using common lab glassware.\n2. Dilute stock to desired concentration.\n3. Measure under consistent illumination. (Local fallback)`;
+      return;
+    }
+    const protocolPrompt = `Generate a very brief, three-step standard operating procedure (SOP) for preparing a basic stock solution or calibration standards for a fluorescence sensing experiment for material that fluoresces ${aiResult.color_description} with intensity ${aiResult.intensity_score}/100.`;
+    const payload = {
+      contents: [{ parts: [{ text: protocolPrompt }] }],
+      systemInstruction: { parts: [{ text: "Provide only 3 numbered steps." }] }
+    };
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${GEMINI_API_KEY}`;
+    const res = await fetchWithRetry(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }, 3);
+    const result = await res.json();
+    const protocolTextResp = result?.candidates?.[0]?.content?.parts?.[0]?.text || 'No protocol generated.';
+    protocolText.textContent = protocolTextResp;
+  } catch (err) {
+    console.error('Protocol error', err);
+    protocolText.textContent = 'Failed to generate protocol (see console).';
+  } finally {
+    genProtocolBtn.disabled = false;
+  }
+});
+
+/* --- Simple local history (in-memory). If Firebase config provided, you can extend this to Firestore. --- */
+let localHistory = [];
+saveBtn.addEventListener('click', () => {
+  if (!aiResult || !previewUrl) { setStatus('No result to save.', 'error'); return; }
+  const entry = {
+    id: Date.now().toString(),
+    timestamp: new Date(),
+    roiSize,
+    samplePos,
+    rgb: {...rgb},
+    intensity: aiResult.intensity_score,
+    color: aiResult.color_description,
+    notes: aiResult.analysis_notes,
+    previewUrl
+  };
+  localHistory.unshift(entry);
+  renderHistory();
+  setStatus('Result saved locally in browser memory (not persistent).', 'success');
+});
+
+/* Render history */
+function renderHistory(){
+  if (!localHistory.length) {
+    historyEl.innerHTML = '<p class="text-gray-500 italic">No results saved yet.</p>';
+    return;
+  }
+  historyEl.innerHTML = '';
+  localHistory.forEach(item => {
+    const div = document.createElement('div');
+    div.className = 'p-3 mb-3 bg-white rounded-xl shadow-sm border border-gray-100 flex items-center justify-between';
+    div.innerHTML = `
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center space-x-2 text-sm font-semibold text-gray-800">
+          <svg class="w-4 h-4 text-indigo-500"></svg>
+          <span>${item.timestamp.toLocaleString()}</span>
+        </div>
+        <div class="mt-1 text-xs text-gray-600 truncate">
+          Intensity: <span class="font-bold text-lg text-teal-600">${item.intensity}</span> | Color: ${item.color} | ROI: ${item.roiSize}x${item.roiSize}
+        </div>
+      </div>
+      <button data-id="${item.id}" class="ml-4 p-2 text-red-500 hover:text-red-700 rounded-full hover:bg-red-50">Delete</button>
+    `;
+    const btn = div.querySelector('button');
+    btn.addEventListener('click', () => {
+      localHistory = localHistory.filter(i => i.id !== item.id);
+      renderHistory();
+      setStatus('Result removed from local history.', 'success');
+    });
+    historyEl.appendChild(div);
+  });
+}
+
+/* Bring small icons into placeholders (using lucide) */
+document.addEventListener("DOMContentLoaded", function(){
+  // replace skeleton icons with lucide
+  const icons = {
+    'camera-icon': 'camera',
+    'upload-icon': 'upload'
+  };
+  Object.keys(icons).forEach(id => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.outerHTML = lucide.createIcon(icons[id], { class: el.className });
+    }
+  });
+});
+
+/* Initial UI states */
+roiValue.textContent = roiSize;
+updateRGBUI();
+setStatus(GEMINI_API_KEY ? 'Gemini API key present — AI enabled (may require server proxy).' : 'No Gemini API key provided — AI calls disabled (local estimate only).', 'info');
+
+</script>
+</body>
+</html>
