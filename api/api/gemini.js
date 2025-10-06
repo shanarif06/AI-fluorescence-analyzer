@@ -1,22 +1,25 @@
 export default async function handler(req, res) {
-  try {
-    const { prompt } = await req.json();
+  const { prompt, image } = req.body;
+  const apiKey = process.env.GEMINI_API_KEY;
 
-    const apiResponse = await fetch(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=" +
-        process.env.GEMINI_API_KEY,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-        }),
-      }
-    );
+  const response = await fetch(
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=" + apiKey,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              { text: prompt },
+              image ? { inlineData: { mimeType: "image/jpeg", data: image } } : null,
+            ].filter(Boolean),
+          },
+        ],
+      }),
+    }
+  );
 
-    const data = await apiResponse.json();
-    res.status(200).json(data);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
+  const data = await response.json();
+  res.status(200).json(data);
 }
